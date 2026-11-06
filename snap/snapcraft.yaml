@@ -1,0 +1,56 @@
+name: provd
+base: core26-desktop
+adopt-info: provd
+summary: provd first-boot wizard backend as a provider snap
+description: |
+  The provd gRPC wizard backend (org.freedesktop.Accounts /
+  hostname1 / locale1 / timedate1 / GDM client) packaged as a provider
+  snap for Ubuntu Core Desktop, replacing the copy the fat base baked
+  into /usr/libexec. Staged from the same resolute `provd` deb the fat
+  base shipped (0.1.5, universe) - the override-build md5 gate asserts
+  byte-identity with that binary, so a silent archive bump fails the
+  build instead of drifting the wizard backend.
+
+  Phase A (payload move): nothing in this snap is started via `snap run`.
+  The host gnome-initial-setup.service unit raw-execs the binary straight
+  out of /snap/provd/current (unconfined, no snap-confine), exactly like
+  the fat base's /usr/libexec/provd was - the launcher logic that used to
+  live in /usr/libexec/launch-desktop-provision-init now runs inline in
+  that unit. apps.provd is declared as a plain command only to document
+  the shape (and for snap run --shell debugging); confinement of the
+  daemon (daemon: simple + daemon-scope: user, plugs, gadget wiring) is a
+  later phase.
+
+  base is core26-desktop (like the accountsservice provider snap): the
+  wizard stack historically ran against the desktop base's /usr, and the
+  Phase B daemon will run in that namespace.
+grade: stable
+confinement: strict
+
+apps:
+  provd:
+    # Plain command, deliberately NOT daemon:/daemon-scope in Phase A:
+    # the host user unit starts the binary by raw exec (unconfined).
+    command: usr/libexec/provd
+
+parts:
+  provd:
+    plugin: nil
+    stage-packages:
+      - provd
+    override-build: |
+      craftctl default
+      # Byte-identity gate: the fat base (and the desktop variant) shipped
+      # usr/libexec/provd from the resolute/universe provd 0.1.5 deb with
+      # this md5. Fail the build if the archive moves underneath us.
+      echo "462a0a1f575bd5d4989cf96c08d842ac  $CRAFT_PART_INSTALL/usr/libexec/provd" | md5sum -c -
+      craftctl set version="$(dpkg-deb -f "$CRAFT_PART_INSTALL"/../stage_packages/provd_*.deb Version)"
+    stage:
+      # The deb's classic launcher execs /snap/bin/ubuntu-desktop-init
+      # (snap run); on this image the host unit carries the launcher
+      # logic inline instead and raw-execs the UI, so the file must not
+      # leak into the snap.
+      - -usr/libexec/launch-desktop-provision-init
+      - -usr/share/doc
+      - -usr/share/man
+      - -usr/share/lintian
