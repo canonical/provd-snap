@@ -97,56 +97,164 @@ apps:
 parts:
   provd:
     plugin: nil
+    # SIZE SURGERY (T4.6): the original staging listed `provd` +
+    # `gnome-keyring` as stage-packages and packed 179.4 MB. Two archive
+    # facts blow the closure up if apt resolves those names:
+    #   1. resolute's provd 0.1.5 carries "Pre-Depends:
+    #      gnome-initial-setup" - a HARD edge that drags the entire
+    #      wizard-GUI closure (webkitgtk-6.0 90M, libLLVM 133M via mesa,
+    #      gtk4+adwaita, gstreamer plugins, pipewire/wireplumber,
+    #      glycin, gnome-settings-daemon, geoclue, icu 32M) into
+    #      staging: 273 debs, none of which the headless daemon loads.
+    #   2. gnome-keyring Depends gcr -> gcr4 -> libgcr-ui-3-1 ->
+    #      libgtk-4-1 (25M+) although gnome-keyring-daemon's loader
+    #      closure only uses libgck-1 + libgcr-base-3.
+    # The provd binary's real DT_NEEDED closure is 40 libraries (walked
+    # with objdump: libcrypt/glib/gio/gobject from the base, libgdk-3 ->
+    # the X11/cairo/pango/wayland stack, gdk-pixbuf -> glycin, gck-1 +
+    # gcr-base-3 for the keyring). provd itself only NEEDs libgdk-3, not
+    # libgtk-3 (the gtk linkage in the deb's Depends is vestigial), but
+    # libgtk-3.so.0 + atk are kept as cheap insurance (see prime notes).
+    # So: the two tainted debs are dpkg-extracted in override-build, and
+    # stage-packages lists only the packages that PROVIDE the needed
+    # libs. The snap ends at its real runtime footprint (~x7 smaller);
+    # every Phase B gate surface (dconf GIO module, glib schemas,
+    # keyring daemon, X11 loader closure) is explicitly kept below.
     stage-packages:
-      - provd
-      # provd (0.1.5, unpatched) starts `gnome-keyring-daemon --unlock`
-      # (temp "gis" password) in its startup path and exits when the
-      # exec fails. The rootfs has no gnome-keyring-daemon (it lives in
-      # the gnome-desktop-runtime content snap, whose bin/ is only on
-      # the session side's PATH once the session env is up - provd as a
-      # user-scope daemon starts BEFORE the session). Stage the deb so
-      # the exec resolves from $SNAP/usr/bin (first on the snap PATH).
-      # The daemon runs detached under this snap's profile; its keyring
-      # file writes are gated like any other confinement surface.
-      - gnome-keyring
+      - libgtk-3-0t64
+      - libgck-1-0
+      - libgcr-base-3-1
+      # libdconfsettings.so - the dconf GSettings backend gio loads
+      # from GIO_EXTRA_MODULES (app env). LOAD-BEARING: without it
+      # gsettings writes silently no-op into the NULL backend (Phase A
+      # fix 2). Self-contained: NEEDs only gio/glib/gobject.
+      - dconf-gsettings-backend
+      # org.gnome.desktop.* schemas provd reads (a11y, interface,
+      # input-sources, wm.preferences, system.location).
+      # LOAD-BEARING (GSETTINGS_SCHEMA_DIR app env).
+      - gsettings-desktop-schemas
     build-packages:
       # for glib-compile-schemas in override-prime
       - libglib2.0-bin
     override-build: |
       craftctl default
+      # provd + gnome-keyring: download the archive debs and extract the
+      # FILES only - bypassing apt resolution so provd's
+      # Pre-Depends: gnome-initial-setup and gnome-keyring's gcr->gtk-4
+      # branch never enter the staging closure (see the parts comment).
+      apt-get download provd gnome-keyring
+      dpkg-deb -x provd_*.deb "$CRAFT_PART_INSTALL"
+      dpkg-deb -x gnome-keyring_*.deb "$CRAFT_PART_INSTALL"
       # Byte-identity gate: the fat base (and the desktop variant) shipped
       # usr/libexec/provd from the resolute/universe provd 0.1.5 deb with
       # this md5. Fail the build if the archive moves underneath us.
       echo "462a0a1f575bd5d4989cf96c08d842ac  $CRAFT_PART_INSTALL/usr/libexec/provd" | md5sum -c -
-      craftctl set version="$(dpkg-deb -f "$CRAFT_PART_INSTALL"/../stage_packages/provd_*.deb Version)"
+      craftctl set version="$(dpkg-deb -f provd_*.deb Version)"
     override-prime: |
       craftctl default
-      # The deb stages the gsettings-desktop-schemas sources (gtk
-      # closure) but debs ship the compiled database via a dpkg trigger
-      # that never runs in a snap build; gio needs the compiled schemas
-      # at runtime or every GSettings lookup fails.
+      # The debs stage the gsettings schema sources but ship the compiled
+      # database via a dpkg trigger that never runs in a snap build; gio
+      # needs the compiled schemas at runtime or every GSettings lookup
+      # fails (covers gsettings-desktop-schemas AND libgtk-3-common's
+      # org.gtk.* schemas - both read through GSETTINGS_SCHEMA_DIR).
       glib-compile-schemas --strict "$CRAFT_PRIME/usr/share/glib-2.0/schemas"
       # The gio libproxy module's libpxbackend dependency sits in a
       # subdirectory only reached via the lib's own absolute RUNPATH -
       # invisible in a snap mount namespace (the kf6-core26 lesson) - so
       # gio logs a load error on every start. provd never resolves
-      # network proxies; drop the module. (The stage-fileset exclusion
-      # for this file does not fire - it arrives via a stage-package
-      # after the fileset pass - hence the rm here.)
+      # network proxies; drop the module. (Defensive: glib-networking is
+      # no longer staged, so the file normally does not exist.)
       rm -f "$CRAFT_PRIME/usr/lib/x86_64-linux-gnu/gio/modules/libgiolibproxy.so"
-    stage:
+    prime:
+      # ---- dead in a snap namespace ----
+      # $SNAP/etc is never mounted into /etc (host /etc comes from the
+      # variant - Phase B baked /etc/fonts there); deb conffiles under
+      # /etc (fontconfig, pulse, ldap, xdg autostart, ...) are payload
+      # for classic systems only. Same for /var state dirs.
+      - -etc
+      - -var
       # The deb's classic launcher execs /snap/bin/ubuntu-desktop-init
-      # (snap run); on this image the host unit carries the UI exec and
-      # the file must not leak into the snap. Also drop the staged
-      # gnome-keyring PAM module + docs (PAM lives on the host side).
+      # (snap run); on this image the host unit carries the UI exec.
       - -usr/libexec/launch-desktop-provision-init
+      # gnome-keyring PAM module: PAM lives on the host side.
+      - -usr/lib/*/security/pam_gnome_keyring.so
+      # snap payload systemd units/sysusers/tmpfiles are inert (snapd
+      # only generates units from app metadata).
+      - -usr/lib/systemd
+      - -usr/lib/sysusers.d
+      - -usr/lib/tmpfiles.d
+      - -usr/lib/udev
+      - -usr/lib/emacsen-common
+      - -usr/lib/aspell
+      - -usr/lib/ispell
+      # ---- headless daemon renders/sniffs nothing ----
+      - -usr/share/icons
+      - -usr/share/fonts
+      - -usr/share/locale
+      - -usr/share/mime
+      - -usr/share/X11
+      - -usr/share/xml
+      - -usr/share/libgweather-4
+      - -usr/share/iso-codes
+      - -usr/share/sounds
+      - -usr/share/themes
+      - -usr/share/thumbnailers
+      - -usr/share/pixmaps
+      - -usr/share/zsh
+      - -usr/share/xdg-desktop-portal
+      - -usr/share/wireplumber
+      - -usr/share/user-session-migration
+      - -usr/share/pkgconfig
+      - -usr/share/dbus-1
+      # session activation files/policies are host+session-snap
+      # territory; the bus never scans this snap's services dir.
       - -usr/share/doc
       - -usr/share/man
       - -usr/share/lintian
-      - -usr/lib/*/security/pam_gnome_keyring.so
-      # gio's libproxy module fails to load inside the snap (its
-      # libpxbackend-1.0.so dependency sits in a subdirectory only
-      # reached via the lib's own absolute RUNPATH - invisible in a snap
-      # mount namespace) and every daemon start logs a load error; provd
-      # never resolves network proxies, drop it.
+      - -usr/share/applications
+      - -usr/share/metainfo
+      # ---- dlopen'd-but-never-used payload ----
+      # glycin image decoders (gdk-pixbuf on resolute delegates to
+      # glycin; provd loads no images). libglycin-2.so.0 itself is
+      # DT_NEEDED by libgdk_pixbuf and STAYS.
+      - -usr/libexec/glycin-loaders
+      - -usr/share/glycin-loaders
+      - -usr/bin/glycin-thumbnailer
+      # glycin's sandbox helper - only the decoders above exec it.
+      - -usr/bin/bwrap
+      # dconf WRITER service: provd only carries the CLIENT backend
+      # (libdconfsettings.so); the writer that commits is the session
+      # snap's confined dconf-service, activated via the dbus-dconf
+      # connection (Phase B evidence: writes land under
+      # snap.ubuntu-desktop-session.dconf-service).
+      - -usr/libexec/dconf-service
+      # glib TLS/proxy modules: no glib-networking staged, and provd
+      # does no TLS/proxy resolution.
+      - -usr/libexec/glib-pacrunner
+      # gtk-update-icon-cache / deb helper cruft.
+      - -usr/bin/gtk-update-icon-cache
+      - -usr/bin/gtk4-update-icon-cache
+      - -usr/sbin
+      # ---- deb-level deps that are NOT in the DT_NEEDED closure ----
+      # (printing, avahi, colord, rsvg, their transitive media libs;
+      # walked with objdump - libgtk-3.so.0 is the only consumer and it
+      # itself is never loaded by provd - kept, these are not.)
+      - -usr/lib/x86_64-linux-gnu/libcups*
+      - -usr/lib/x86_64-linux-gnu/libavahi*
+      - -usr/lib/x86_64-linux-gnu/libcolord*
+      - -usr/lib/x86_64-linux-gnu/librsvg*
+      - -usr/lib/x86_64-linux-gnu/libxml2*
+      - -usr/lib/x86_64-linux-gnu/libheif*
+      - -usr/lib/x86_64-linux-gnu/libjxl*
+      - -usr/lib/x86_64-linux-gnu/libaom*
+      - -usr/lib/x86_64-linux-gnu/libhwy*
+      - -usr/lib/x86_64-linux-gnu/libsharpyuv*
+      - -usr/lib/x86_64-linux-gnu/libdeflate*
+      - -usr/lib/x86_64-linux-gnu/liblerc*
+      - -usr/lib/x86_64-linux-gnu/libjbig*
+      - -usr/lib/x86_64-linux-gnu/libtiff*
+      - -usr/lib/x86_64-linux-gnu/libjpeg*
+      - -usr/lib/x86_64-linux-gnu/libwebp*
+      - -usr/lib/x86_64-linux-gnu/libdv*
+      - -usr/lib/x86_64-linux-gnu/libiec61883*
       - -usr/lib/x86_64-linux-gnu/gio/modules/libgiolibproxy.so
