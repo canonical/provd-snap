@@ -1,7 +1,7 @@
 name: provd
 base: core26-desktop
 adopt-info: provd
-summary: provd first-boot wizard backend as a provider snap
+summary: provd first-boot wizard backend as a confined provider snap
 description: |
   The provd gRPC wizard backend (org.freedesktop.Accounts /
   hostname1 / locale1 / timedate1 / GDM client) packaged as a provider
@@ -11,33 +11,107 @@ description: |
   byte-identity with that binary, so a silent archive bump fails the
   build instead of drifting the wizard backend.
 
-  Phase A (payload move): nothing in this snap is started via `snap run`.
-  The host gnome-initial-setup.service unit raw-execs the binary straight
-  out of /snap/provd/current (unconfined, no snap-confine), exactly like
-  the fat base's /usr/libexec/provd was - the launcher logic that used to
-  live in /usr/libexec/launch-desktop-provision-init now runs inline in
-  that unit. apps.provd is declared as a plain command only to document
-  the shape (and for snap run --shell debugging); confinement of the
-  daemon (daemon: simple + daemon-scope: user, plugs, gadget wiring) is a
-  later phase.
-
   base is core26-desktop (like the accountsservice provider snap): the
   wizard stack historically ran against the desktop base's /usr, and the
-  Phase B daemon will run in that namespace.
+  daemon runs in that namespace.
+
+  Phase B (confinement): apps.provd is a user-scope systemd daemon
+  (daemon: simple + daemon-scope: user) - snapd generates
+  /etc/systemd/user/snap.provd.provd.service and starts it with every
+  user manager; the base bakes a ConditionGroup=gnome-initial-setup
+  drop-in so it only actually runs for the transient wizard user. It
+  must run as the session user because it binds the wizard gRPC socket
+  itself and chmods it 0600 (the Flutter UI connects to it), and
+  because its gsettings/dconf writes go over the session bus. The
+  socket stays at /run/gnome-initial-setup/desktop-provision/init.socket
+  (the path the raw-exec'd UI hardcodes) via the provd-run system-files
+  plug against the implicit core slot; the GDM session handoff runs
+  through the new gdm interface plug; dconf writes go through the
+  dbus-dconf plug connected to the session snap's dbus-dconf slot, which
+  also grants the confined dconf-service the peer rule for this snap's
+  label (the Phase A unconfined-sender denial).
 grade: stable
 confinement: strict
 
+plugs:
+  # The wizard gRPC socket directory: provd binds
+  # /run/gnome-initial-setup/desktop-provision/init.socket itself. The
+  # implicit core snap provides the slot (system:system-files), the same
+  # shape the session snap's gnome-content-launch/shell-config-files
+  # plugs use. NOTE: system-files paths must be LITERAL - the interface
+  # validation rejects apparmor glob characters and appends {,/,/**}
+  # (full recursion) to the declared path itself. File rules mediate the
+  # filesystem-socket bind/connect on this image (same pattern as the
+  # gdm private-bus access in the gdm interface).
+  provd-run:
+    interface: system-files
+    write:
+      - /run/gnome-initial-setup
+  # dconf writer peer: connects to the session snap's dbus-dconf slot
+  # (ca.desrt.dconf, session bus). The connection adds this snap's label
+  # to the dconf-service side's receive policy - without it the confined
+  # dconf-service denies the wizard's commits (Phase A open issue).
+  dbus-dconf:
+    interface: dbus
+    bus: session
+    name: ca.desrt.dconf
+
 apps:
   provd:
-    # Plain command, deliberately NOT daemon:/daemon-scope in Phase A:
-    # the host user unit starts the binary by raw exec (unconfined).
     command: usr/libexec/provd
+    daemon: simple
+    daemon-scope: user
+    plugs:
+      # CreateUser/SetPassword/SetAutomaticLogin via the accountsservice
+      # provider snap (T4.1); provd is only a polkit subject, no polkit
+      # plug needed (the daemon does the CheckAuthorization).
+      - accountsservice
+      # Manager.OpenSession + the private session bus the call returns
+      # (session handoff at wizard completion; gdm.New is fatal to
+      # services.NewManager, so this rule must be right).
+      - gdm
+      # CreateUser also drives hostname1.SetStaticHostname; the keyboard
+      # and locale pages drive locale1.SetX11Keyboard/SetLocale.
+      - hostname-control
+      - locale-control
+      - timezone-control
+      - dbus-dconf
+      - provd-run
+      # provd self-binds its gRPC unix socket (net.Listen); the seccomp
+      # template denies listen(2) for snap apps - network-bind is the
+      # standard server-socket grant (accept/accept4/bind/listen, all
+      # domains incl. AF_UNIX). Its AppArmor side adds `network bind`
+      # (INET), which provd never uses - accepted overgrant for the
+      # standard-interface shape.
+      - network-bind
+    environment:
+      # The staged deb closure: the dconf GSettings backend module and
+      # the compiled glib schemas. The rootfs ships neither - gio scans
+      # the compiled-in prefix of the loaded libgio (the base's), and
+      # GIO_EXTRA_MODULES is load-bearing: without it gsettings writes
+      # silently no-op into the NULL backend (Phase A fix, now pointed
+      # at the snap's own staged copy).
+      GIO_EXTRA_MODULES: $SNAP/usr/lib/x86_64-linux-gnu/gio/modules
+      GSETTINGS_SCHEMA_DIR: $SNAP/usr/share/glib-2.0/schemas
 
 parts:
   provd:
     plugin: nil
     stage-packages:
       - provd
+      # provd (0.1.5, unpatched) starts `gnome-keyring-daemon --unlock`
+      # (temp "gis" password) in its startup path and exits when the
+      # exec fails. The rootfs has no gnome-keyring-daemon (it lives in
+      # the gnome-desktop-runtime content snap, whose bin/ is only on
+      # the session side's PATH once the session env is up - provd as a
+      # user-scope daemon starts BEFORE the session). Stage the deb so
+      # the exec resolves from $SNAP/usr/bin (first on the snap PATH).
+      # The daemon runs detached under this snap's profile; its keyring
+      # file writes are gated like any other confinement surface.
+      - gnome-keyring
+    build-packages:
+      # for glib-compile-schemas in override-prime
+      - libglib2.0-bin
     override-build: |
       craftctl default
       # Byte-identity gate: the fat base (and the desktop variant) shipped
@@ -45,12 +119,34 @@ parts:
       # this md5. Fail the build if the archive moves underneath us.
       echo "462a0a1f575bd5d4989cf96c08d842ac  $CRAFT_PART_INSTALL/usr/libexec/provd" | md5sum -c -
       craftctl set version="$(dpkg-deb -f "$CRAFT_PART_INSTALL"/../stage_packages/provd_*.deb Version)"
+    override-prime: |
+      craftctl default
+      # The deb stages the gsettings-desktop-schemas sources (gtk
+      # closure) but debs ship the compiled database via a dpkg trigger
+      # that never runs in a snap build; gio needs the compiled schemas
+      # at runtime or every GSettings lookup fails.
+      glib-compile-schemas --strict "$CRAFT_PRIME/usr/share/glib-2.0/schemas"
+      # The gio libproxy module's libpxbackend dependency sits in a
+      # subdirectory only reached via the lib's own absolute RUNPATH -
+      # invisible in a snap mount namespace (the kf6-core26 lesson) - so
+      # gio logs a load error on every start. provd never resolves
+      # network proxies; drop the module. (The stage-fileset exclusion
+      # for this file does not fire - it arrives via a stage-package
+      # after the fileset pass - hence the rm here.)
+      rm -f "$CRAFT_PRIME/usr/lib/x86_64-linux-gnu/gio/modules/libgiolibproxy.so"
     stage:
       # The deb's classic launcher execs /snap/bin/ubuntu-desktop-init
-      # (snap run); on this image the host unit carries the launcher
-      # logic inline instead and raw-execs the UI, so the file must not
-      # leak into the snap.
+      # (snap run); on this image the host unit carries the UI exec and
+      # the file must not leak into the snap. Also drop the staged
+      # gnome-keyring PAM module + docs (PAM lives on the host side).
       - -usr/libexec/launch-desktop-provision-init
       - -usr/share/doc
       - -usr/share/man
       - -usr/share/lintian
+      - -usr/lib/*/security/pam_gnome_keyring.so
+      # gio's libproxy module fails to load inside the snap (its
+      # libpxbackend-1.0.so dependency sits in a subdirectory only
+      # reached via the lib's own absolute RUNPATH - invisible in a snap
+      # mount namespace) and every daemon start logs a load error; provd
+      # never resolves network proxies, drop it.
+      - -usr/lib/x86_64-linux-gnu/gio/modules/libgiolibproxy.so
