@@ -13,6 +13,8 @@
 # core26 base. snapcraft's schema validation rejects 'core26-desktop' as
 # a base name, so the placeholder swap is required (same recipe as
 # plasma-desktop-session's build-github.sh).
+# SUFFIX (set by the workflow matrix) is appended to the published asset
+# name ("" on amd64, "-arm64" on the arm64 leg).
 set -euo pipefail
 
 rm -f ./*.snap
@@ -48,4 +50,4 @@ sed -i 's/^base: core26$/base: core26-desktop/' "$tmp/squashfs-root/meta/snap.ya
 mksquashfs "$tmp/squashfs-root" "$built" -noappend -comp xz -no-progress -xattrs
 rm -rf "$tmp"
 
-cp -f "$built" provd.snap
+cp -f "$built" "provd${SUFFIX:-}.snap"

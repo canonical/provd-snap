@@ -90,8 +90,9 @@ apps:
       # the compiled-in prefix of the loaded libgio (the base's), and
       # GIO_EXTRA_MODULES is load-bearing: without it gsettings writes
       # silently no-op into the NULL backend (Phase A fix, now pointed
-      # at the snap's own staged copy).
-      GIO_EXTRA_MODULES: $SNAP/usr/lib/x86_64-linux-gnu/gio/modules
+      # at the snap's own staged copy). $CRAFT_ARCH_TRIPLET_BUILD_FOR
+      # is expanded by snapcraft at pack time (per build arch).
+      GIO_EXTRA_MODULES: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/gio/modules
       GSETTINGS_SCHEMA_DIR: $SNAP/usr/share/glib-2.0/schemas
 
 parts:
@@ -148,7 +149,22 @@ parts:
       # Byte-identity gate: the fat base (and the desktop variant) shipped
       # usr/libexec/provd from the resolute/universe provd 0.1.5 deb with
       # this md5. Fail the build if the archive moves underneath us.
-      echo "462a0a1f575bd5d4989cf96c08d842ac  $CRAFT_PART_INSTALL/usr/libexec/provd" | md5sum -c -
+      # Per-arch expected md5 of the deb's usr/libexec/provd (amd64 and
+      # arm64 ports builds differ, as ELFs do).
+      arch="$(dpkg --print-architecture)"
+      case "$arch" in
+        amd64) expected=462a0a1f575bd5d4989cf96c08d842ac ;;
+        arm64) expected=ffb36ef7f0f2994edadde696dcfc45d0 ;;
+        *)
+          echo "unsupported build architecture: $arch" >&2
+          exit 1
+          ;;
+      esac
+      actual="$(md5sum "$CRAFT_PART_INSTALL/usr/libexec/provd" | cut -d' ' -f1)"
+      if [ "$actual" != "$expected" ]; then
+        echo "provd md5 $actual != expected $expected (resolute 0.1.5 $arch)" >&2
+        exit 1
+      fi
       craftctl set version="$(dpkg-deb -f provd_*.deb Version)"
     override-prime: |
       craftctl default
@@ -164,7 +180,7 @@ parts:
       # gio logs a load error on every start. provd never resolves
       # network proxies; drop the module. (Defensive: glib-networking is
       # no longer staged, so the file normally does not exist.)
-      rm -f "$CRAFT_PRIME/usr/lib/x86_64-linux-gnu/gio/modules/libgiolibproxy.so"
+      rm -f "$CRAFT_PRIME"/usr/lib/*/gio/modules/libgiolibproxy.so
     prime:
       # ---- dead in a snap namespace ----
       # $SNAP/etc is never mounted into /etc (host /etc comes from the
@@ -239,22 +255,22 @@ parts:
       # (printing, avahi, colord, rsvg, their transitive media libs;
       # walked with objdump - libgtk-3.so.0 is the only consumer and it
       # itself is never loaded by provd - kept, these are not.)
-      - -usr/lib/x86_64-linux-gnu/libcups*
-      - -usr/lib/x86_64-linux-gnu/libavahi*
-      - -usr/lib/x86_64-linux-gnu/libcolord*
-      - -usr/lib/x86_64-linux-gnu/librsvg*
-      - -usr/lib/x86_64-linux-gnu/libxml2*
-      - -usr/lib/x86_64-linux-gnu/libheif*
-      - -usr/lib/x86_64-linux-gnu/libjxl*
-      - -usr/lib/x86_64-linux-gnu/libaom*
-      - -usr/lib/x86_64-linux-gnu/libhwy*
-      - -usr/lib/x86_64-linux-gnu/libsharpyuv*
-      - -usr/lib/x86_64-linux-gnu/libdeflate*
-      - -usr/lib/x86_64-linux-gnu/liblerc*
-      - -usr/lib/x86_64-linux-gnu/libjbig*
-      - -usr/lib/x86_64-linux-gnu/libtiff*
-      - -usr/lib/x86_64-linux-gnu/libjpeg*
-      - -usr/lib/x86_64-linux-gnu/libwebp*
-      - -usr/lib/x86_64-linux-gnu/libdv*
-      - -usr/lib/x86_64-linux-gnu/libiec61883*
-      - -usr/lib/x86_64-linux-gnu/gio/modules/libgiolibproxy.so
+      - -usr/lib/*/libcups*
+      - -usr/lib/*/libavahi*
+      - -usr/lib/*/libcolord*
+      - -usr/lib/*/librsvg*
+      - -usr/lib/*/libxml2*
+      - -usr/lib/*/libheif*
+      - -usr/lib/*/libjxl*
+      - -usr/lib/*/libaom*
+      - -usr/lib/*/libhwy*
+      - -usr/lib/*/libsharpyuv*
+      - -usr/lib/*/libdeflate*
+      - -usr/lib/*/liblerc*
+      - -usr/lib/*/libjbig*
+      - -usr/lib/*/libtiff*
+      - -usr/lib/*/libjpeg*
+      - -usr/lib/*/libwebp*
+      - -usr/lib/*/libdv*
+      - -usr/lib/*/libiec61883*
+      - -usr/lib/*/gio/modules/libgiolibproxy.so
