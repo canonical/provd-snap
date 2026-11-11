@@ -55,6 +55,17 @@ plugs:
     interface: dbus
     bus: session
     name: ca.desrt.dconf
+  # T26 gap (c): the wizard->user accessibility handover. provd records
+  # the wizard session's a11y preferences and the created username under
+  # /etc/dconf at CreateUser (internal/services/user/handover.go); the
+  # desktop base's static session unit (ucd-a11y-handover) applies them
+  # at the target user's first login. system-files paths must be
+  # LITERAL; /etc/dconf does not exist on the base (verified 20261111
+  # +desktop) so the write grant also covers creating the directory.
+  a11y-handover:
+    interface: system-files
+    write:
+      - /etc/dconf
 
 apps:
   provd:
@@ -76,6 +87,8 @@ apps:
       - locale-control
       - timezone-control
       - dbus-dconf
+      # T26 gap (c): /etc/dconf write for the wizard->user a11y handover.
+      - a11y-handover
       - provd-run
       # provd self-binds its gRPC unix socket (net.Listen); the seccomp
       # template denies listen(2) for snap apps - network-bind is the
@@ -146,6 +159,20 @@ parts:
       apt-get download provd gnome-keyring
       dpkg-deb -x provd_*.deb "$CRAFT_PART_INSTALL"
       dpkg-deb -x gnome-keyring_*.deb "$CRAFT_PART_INSTALL"
+      # T26 gap (c): when a source-built provd binary is placed at
+      # provd-src-built in the project root (go build ./cmd/provd from
+      # the ubuntu-desktop-provision/provd tree), it REPLACES the
+      # archive deb's binary and the md5 gate below is skipped - the
+      # gate asserts byte-identity with the resolute 0.1.5 archive,
+      # which a source build with the wizard->user accessibility
+      # handover (user.CreateUser -> writeA11yHandover) intentionally
+      # breaks. Without that file the stock archive path and gate are
+      # unchanged.
+      if [ -f "$CRAFT_PART_BUILD/../../provd-src-built" ]; then
+        install -m 0755 "$CRAFT_PART_BUILD/../../provd-src-built" \
+          "$CRAFT_PART_INSTALL/usr/libexec/provd"
+        echo "T26: staging the source-built provd binary (handover build)"
+      else
       # Byte-identity gate: the fat base (and the desktop variant) shipped
       # usr/libexec/provd from the resolute/universe provd 0.1.5 deb with
       # this md5. Fail the build if the archive moves underneath us.
@@ -165,7 +192,12 @@ parts:
         echo "provd md5 $actual != expected $expected (resolute 0.1.5 $arch)" >&2
         exit 1
       fi
-      craftctl set version="$(dpkg-deb -f provd_*.deb Version)"
+      fi
+      if [ -f "$CRAFT_PART_BUILD/../../provd-src-built" ]; then
+        craftctl set version="$(dpkg-deb -f provd_*.deb Version)+t26handover"
+      else
+        craftctl set version="$(dpkg-deb -f provd_*.deb Version)"
+      fi
     override-prime: |
       craftctl default
       # The debs stage the gsettings schema sources but ship the compiled
