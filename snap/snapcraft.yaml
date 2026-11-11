@@ -168,8 +168,8 @@ parts:
       # handover (user.CreateUser -> writeA11yHandover) intentionally
       # breaks. Without that file the stock archive path and gate are
       # unchanged.
-      if [ -f "$CRAFT_PART_BUILD/../../provd-src-built" ]; then
-        install -m 0755 "$CRAFT_PART_BUILD/../../provd-src-built" \
+      if [ -f "$CRAFT_PROJECT_DIR/provd-src-built" ]; then
+        install -m 0755 "$CRAFT_PROJECT_DIR/provd-src-built" \
           "$CRAFT_PART_INSTALL/usr/libexec/provd"
         echo "T26: staging the source-built provd binary (handover build)"
       else
@@ -193,7 +193,7 @@ parts:
         exit 1
       fi
       fi
-      if [ -f "$CRAFT_PART_BUILD/../../provd-src-built" ]; then
+      if [ -f "$CRAFT_PROJECT_DIR/provd-src-built" ]; then
         craftctl set version="$(dpkg-deb -f provd_*.deb Version)+t26handover"
       else
         craftctl set version="$(dpkg-deb -f provd_*.deb Version)"
