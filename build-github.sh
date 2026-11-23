@@ -29,6 +29,11 @@ trap restore_base EXIT
 # The version is stamped in the 'provd' part's override-build. snapcraft
 # caches that scriptlet whenever the part definition is unchanged, so
 # clean the part every run to keep the version honest.
+# Build the provd daemon from the pinned source first: the staged
+# binary replaces the resolute deb's and the md5 gate is skipped (the
+# desktop/26 image flow's fix stream - see the script's header).
+./build-provd-from-source.sh
+
 snapcraft clean provd |& tee build.log
 
 snapcraft pack |& tee -a build.log
