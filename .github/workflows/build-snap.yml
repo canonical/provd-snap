@@ -23,7 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y fakeroot squashfs-tools
+        # pkg-config + libglib2.0-dev: provd's cgo bindings
+        # (linuxdeepin/go-gir glib-2.0/gobject-2.0) compile against glib.
+        run: sudo apt-get update && sudo apt-get install -y fakeroot squashfs-tools pkg-config libglib2.0-dev
       - name: Set up Go (provd is built from source, not the archive deb)
         uses: actions/setup-go@v7
         with:
