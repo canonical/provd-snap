@@ -23,7 +23,8 @@ description: |
   must run as the session user because it binds the wizard gRPC socket
   itself and chmods it 0600 (the Flutter UI connects to it), and
   because its gsettings/dconf writes go over the session bus. The
-  socket stays at /run/gnome-initial-setup/desktop-provision/init.socket
+  socket lives in the wizard session home, at
+  /run/gdm3/home/gnome-initial-setup/desktop-provision/init.socket
   (the path the raw-exec'd UI hardcodes) via the provd-run system-files
   plug against the implicit core slot; the GDM session handoff runs
   through the new gdm interface plug; dconf writes go through the
@@ -35,9 +36,9 @@ confinement: strict
 
 plugs:
   # The wizard gRPC socket directory: provd binds
-  # /run/gnome-initial-setup/desktop-provision/init.socket itself. The
-  # implicit core snap provides the slot (system:system-files), the same
-  # shape the session snap's gnome-content-launch/shell-config-files
+  # /run/gdm3/home/gnome-initial-setup/desktop-provision/init.socket
+  # itself. The implicit core snap provides the slot (system:system-files),
+  # the same shape the session snap's gnome-content-launch/shell-config-files
   # plugs use. NOTE: system-files paths must be LITERAL - the interface
   # validation rejects apparmor glob characters and appends {,/,/**}
   # (full recursion) to the declared path itself. File rules mediate the
@@ -46,7 +47,7 @@ plugs:
   provd-run:
     interface: system-files
     write:
-      - /run/gnome-initial-setup
+      - /run/gdm3/home/gnome-initial-setup
   # dconf writer peer: connects to the session snap's dbus-dconf slot
   # (ca.desrt.dconf, session bus). The connection adds this snap's label
   # to the dconf-service side's receive policy - without it the confined
